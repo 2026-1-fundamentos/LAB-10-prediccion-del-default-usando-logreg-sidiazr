@@ -95,3 +95,239 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+import gzip
+import json
+import os
+import pickle
+
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    balanced_accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+)
+from sklearn.model_selection import GridSearchCV
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
+from sklearn.feature_selection import SelectKBest, f_classif
+
+
+def cargar_datos():
+    entrenamiento = pd.read_csv(
+        "files/input/train_data.csv.zip",
+        compression="zip",
+    )
+
+    prueba = pd.read_csv(
+        "files/input/test_data.csv.zip",
+        compression="zip",
+    )
+
+    return entrenamiento, prueba
+
+
+def limpiar_datos(datos):
+    datos = datos.rename(
+        columns={"default payment next month": "default"}
+    )
+
+    datos = datos.drop(columns=["ID"])
+
+    datos = datos[datos["EDUCATION"] != 0]
+    datos = datos[datos["MARRIAGE"] != 0]
+
+    datos["EDUCATION"] = datos["EDUCATION"].apply(
+        lambda valor: 4 if valor > 4 else valor
+    )
+
+    return datos
+
+
+def separar_variables(datos):
+    caracteristicas = datos.drop(columns=["default"])
+    objetivo = datos["default"]
+
+    return caracteristicas, objetivo
+
+
+def construir_pipeline():
+
+    variables_categoricas = [
+        "SEX",
+        "EDUCATION",
+        "MARRIAGE",
+    ]
+    variables_numericas=["PAY_AMT6","PAY_AMT5", "PAY_AMT4",
+                         "PAY_AMT3","PAY_AMT2","PAY_AMT1",
+                         "BILL_AMT6","BILL_AMT5","BILL_AMT4","BILL_AMT3",
+                         "BILL_AMT2","BILL_AMT1","PAY_6","PAY_5",
+                         "PAY_4","PAY_3","PAY_2","PAY_0","LIMIT_BAL","AGE"]
+    transformador = ColumnTransformer(
+        transformers=[
+            (
+                "categoricas",
+                OneHotEncoder(handle_unknown="ignore"),
+                variables_categoricas,
+            ),
+            (
+                "conversion",
+                MinMaxScaler(),
+                variables_numericas
+            )
+        ],
+        remainder="passthrough",
+    )
+
+    pipeline = Pipeline(
+        steps=[
+            ("preprocesamiento", transformador),
+            ("seleccion", SelectKBest(score_func=f_classif)),
+            ("modelo",LogisticRegression(random_state=0)),
+        ]
+    )
+
+    return pipeline
+def entrenar_modelo(x_train, y_train):
+
+    parametros = {
+    'seleccion__k': range(1, 11),
+    'modelo__C': [0.001, 0.01, 0.1, 1, 10, 100],
+    'modelo__penalty': ['l1', 'l2'],
+    'modelo__solver': ['liblinear'],
+    "modelo__max_iter": [100, 200]
+    }
+
+    grid = GridSearchCV(
+        estimator=construir_pipeline(),
+        param_grid=parametros,
+        cv=10,
+        scoring="balanced_accuracy",
+        n_jobs=7,
+        verbose=1,
+        refit=True,
+    )
+
+    grid.fit(x_train, y_train)
+
+    return grid
+
+
+def guardar_modelo(modelo):
+
+    os.makedirs("files/models", exist_ok=True)
+
+    with gzip.open(
+        "files/models/model.pkl.gz",
+        "wb",
+    ) as archivo:
+        pickle.dump(modelo, archivo, protocol=4)
+
+
+def calcular_metricas(nombre, reales, predichos):
+
+    return {
+        "type": "metrics",
+        "dataset": nombre,
+        "precision": round(
+            precision_score(reales, predichos),
+            4,
+        ),
+        "balanced_accuracy": round(
+            balanced_accuracy_score(reales, predichos),
+            4,
+        ),
+        "recall": round(
+            recall_score(reales, predichos),
+            4,
+        ),
+        "f1_score": round(
+            f1_score(reales, predichos),
+            4,
+        ),
+    }
+
+
+def calcular_matriz(nombre, reales, predichos):
+
+    matriz = confusion_matrix(reales, predichos)
+
+    return {
+        "type": "cm_matrix",
+        "dataset": nombre,
+        "true_0": {
+            "predicted_0": int(matriz[0][0]),
+            "predicted_1": int(matriz[0][1]),
+        },
+        "true_1": {
+            "predicted_0": int(matriz[1][0]),
+            "predicted_1": int(matriz[1][1]),
+        },
+    }
+
+
+def guardar_resultados(resultados):
+
+    os.makedirs("files/output", exist_ok=True)
+
+    with open(
+        "files/output/metrics.json",
+        "w",
+        encoding="utf-8",
+    ) as archivo:
+
+        for resultado in resultados:
+            archivo.write(json.dumps(resultado))
+            archivo.write("\n")
+
+
+def main():
+
+    datos_entrenamiento, datos_prueba = cargar_datos()
+
+    datos_entrenamiento = limpiar_datos(datos_entrenamiento)
+    datos_prueba = limpiar_datos(datos_prueba)
+
+    x_train, y_train = separar_variables(datos_entrenamiento)
+    x_test, y_test = separar_variables(datos_prueba)
+
+    modelo = entrenar_modelo(x_train, y_train)
+
+    guardar_modelo(modelo)
+
+    mejor_modelo = modelo.best_estimator_
+
+    pred_train = mejor_modelo.predict(x_train)
+    pred_test = mejor_modelo.predict(x_test)
+
+    resultados = [
+        calcular_metricas(
+            "train",
+            y_train,
+            pred_train,
+        ),
+        calcular_metricas(
+            "test",
+            y_test,
+            pred_test,
+        ),
+        calcular_matriz(
+            "train",
+            y_train,
+            pred_train,
+        ),
+        calcular_matriz(
+            "test",
+            y_test,
+            pred_test,
+        ),
+    ]
+
+    guardar_resultados(resultados)
+
+
+if __name__ == "__main__":
+    main()
